@@ -10,13 +10,10 @@ import torch as th
 from dgl.data.utils import download, extract_archive, get_download_dir
 from utils import to_etype_name
 
-_urls = {
-    "ml-100k": "http://files.grouplens.org/datasets/movielens/ml-100k.zip",
-    "ml-1m": "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
-    "ml-10m": "http://files.grouplens.org/datasets/movielens/ml-10m.zip",
-}
+from dgl.data import DGLDataset, DGLBuiltinDataset
+from dgl.data.utils import _get_dgl_url
 
-READ_DATASET_PATH = get_download_dir()
+
 GENRES_ML_100K = [
     "unknown",
     "Action",
@@ -42,7 +39,7 @@ GENRES_ML_1M = GENRES_ML_100K[1:]
 GENRES_ML_10M = GENRES_ML_100K + ["IMAX"]
 
 
-class MovieLens(object):
+class MovieLens(DGLBuiltinDataset):
     """MovieLens dataset used by GCMC model
 
     TODO(minjie): make this dataset more general
@@ -115,10 +112,20 @@ class MovieLens(object):
 
     """
 
+    _urls = {
+        "ml-100k": "http://files.grouplens.org/datasets/movielens/ml-100k.zip",
+        "ml-1m": "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
+        "ml-10m": "http://files.grouplens.org/datasets/movielens/ml-10m.zip",
+    }
+
     def __init__(
         self,
         name,
-        device,
+        device, # TODO: do we need this?
+        raw_dir=None,
+        force_reload=None,
+        verbose=False,
+        transform=None,
         mix_cpu_gpu=False,
         use_one_hot_fea=False,
         symm=True,
@@ -130,20 +137,15 @@ class MovieLens(object):
         self._symm = symm
         self._test_ratio = test_ratio
         self._valid_ratio = valid_ratio
-        # download and extract
-        download_dir = get_download_dir()
-        zip_file_path = "{}/{}.zip".format(download_dir, name)
-        download(_urls[name], path=zip_file_path)
-        extract_archive(zip_file_path, "{}/{}".format(download_dir, name))
-        if name == "ml-10m":
-            root_folder = "ml-10M100K"
-        else:
-            root_folder = name
-        self._dir = os.path.join(download_dir, name, root_folder)
+        self._use_one_hot_fea = use_one_hot_fea
+        self._mix_cpu_gpu = mix_cpu_gpu
+        super(MovieLens, self).__init__(name=name, url=self._url[name], raw_dir=raw_dir, force_reload=force_reload, verbose=verbose,
+                                        transform=transform)
+        
+    def process(self):
         print("Starting processing {} ...".format(self._name))
         self._load_raw_user_info()
         self._load_raw_movie_info()
-        print("......")
         if self._name == "ml-100k":
             self.all_train_rating_info = self._load_raw_rates(
                 os.path.join(self._dir, "u1.base"), "\t"
@@ -170,7 +172,6 @@ class MovieLens(object):
             ]
         else:
             raise NotImplementedError
-        print("......")
         num_valid = int(
             np.ceil(self.all_train_rating_info.shape[0] * self._valid_ratio)
         )
@@ -185,26 +186,6 @@ class MovieLens(object):
         ]
         self.possible_rating_values = np.unique(
             self.train_rating_info["rating"].values
-        )
-
-        print("All rating pairs : {}".format(self.all_rating_info.shape[0]))
-        print(
-            "\tAll train rating pairs : {}".format(
-                self.all_train_rating_info.shape[0]
-            )
-        )
-        print(
-            "\t\tTrain rating pairs : {}".format(
-                self.train_rating_info.shape[0]
-            )
-        )
-        print(
-            "\t\tValid rating pairs : {}".format(
-                self.valid_rating_info.shape[0]
-            )
-        )
-        print(
-            "\tTest rating pairs  : {}".format(self.test_rating_info.shape[0])
         )
 
         self.user_info = self._drop_unseen_nodes(
@@ -227,21 +208,16 @@ class MovieLens(object):
         self.global_movie_id_map = {
             ele: i for i, ele in enumerate(self.movie_info["id"])
         }
-        print(
-            "Total user number = {}, movie number = {}".format(
-                len(self.global_user_id_map), len(self.global_movie_id_map)
-            )
-        )
         self._num_user = len(self.global_user_id_map)
         self._num_movie = len(self.global_movie_id_map)
 
         ### Generate features
-        if use_one_hot_fea:
+        if self._use_one_hot_fea:
             self.user_feature = None
             self.movie_feature = None
         else:
             # if mix_cpu_gpu, we put features in CPU
-            if mix_cpu_gpu:
+            if self.mix_cpu_gpu:
                 self.user_feature = th.FloatTensor(self._process_user_fea())
                 self.movie_feature = th.FloatTensor(self._process_movie_fea())
             else:
@@ -257,15 +233,9 @@ class MovieLens(object):
         else:
             self.user_feature_shape = self.user_feature.shape
             self.movie_feature_shape = self.movie_feature.shape
-        info_line = "Feature dim: "
-        info_line += "\nuser: {}".format(self.user_feature_shape)
-        info_line += "\nmovie: {}".format(self.movie_feature_shape)
-        print(info_line)
 
-        (
-            all_train_rating_pairs,
-            all_train_rating_values,
-        ) = self._generate_pair_value(self.all_train_rating_info)
+        all_train_rating_pairs, all_train_rating_values = \
+            self._generate_pair_value(self.all_train_rating_info)
         train_rating_pairs, train_rating_values = self._generate_pair_value(
             self.train_rating_info
         )
@@ -279,7 +249,7 @@ class MovieLens(object):
         def _make_labels(ratings):
             labels = th.LongTensor(
                 np.searchsorted(self.possible_rating_values, ratings)
-            ).to(device)
+            ).to(self._device)
             return labels
 
         self.train_enc_graph = self._generate_enc_graph(
@@ -287,69 +257,124 @@ class MovieLens(object):
         )
         self.train_dec_graph = self._generate_dec_graph(train_rating_pairs)
         self.train_labels = _make_labels(train_rating_values)
-        self.train_truths = th.FloatTensor(train_rating_values).to(device)
+        self.train_truths = th.FloatTensor(train_rating_values).to(self._device)
 
         self.valid_enc_graph = self.train_enc_graph
         self.valid_dec_graph = self._generate_dec_graph(valid_rating_pairs)
         self.valid_labels = _make_labels(valid_rating_values)
-        self.valid_truths = th.FloatTensor(valid_rating_values).to(device)
+        self.valid_truths = th.FloatTensor(valid_rating_values).to(self._device)
 
         self.test_enc_graph = self._generate_enc_graph(
             all_train_rating_pairs, all_train_rating_values, add_support=True
         )
         self.test_dec_graph = self._generate_dec_graph(test_rating_pairs)
         self.test_labels = _make_labels(test_rating_values)
-        self.test_truths = th.FloatTensor(test_rating_values).to(device)
+        self.test_truths = th.FloatTensor(test_rating_values).to(self._device)
 
-        def _npairs(graph):
-            rst = 0
-            for r in self.possible_rating_values:
-                r = to_etype_name(r)
-                rst += graph.num_edges(str(r))
-            return rst
+        self._info()
 
-        print(
-            "Train enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.train_enc_graph.num_nodes("user"),
-                self.train_enc_graph.num_nodes("movie"),
-                _npairs(self.train_enc_graph),
+    def _info(self):
+        if self.verbose:
+            print(
+                "Total user number = {}, movie number = {}".format(
+                    len(self.global_user_id_map), len(self.global_movie_id_map)
+                )
             )
-        )
-        print(
-            "Train dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.train_dec_graph.num_nodes("user"),
-                self.train_dec_graph.num_nodes("movie"),
-                self.train_dec_graph.num_edges(),
+            print("All rating pairs : {}".format(self.all_rating_info.shape[0]))
+            print(
+                "\tAll train rating pairs : {}".format(
+                    self.all_train_rating_info.shape[0]
+                )
             )
-        )
-        print(
-            "Valid enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.valid_enc_graph.num_nodes("user"),
-                self.valid_enc_graph.num_nodes("movie"),
-                _npairs(self.valid_enc_graph),
+            print(
+                "\t\tTrain rating pairs : {}".format(
+                    self.train_rating_info.shape[0]
+                )
             )
-        )
-        print(
-            "Valid dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.valid_dec_graph.num_nodes("user"),
-                self.valid_dec_graph.num_nodes("movie"),
-                self.valid_dec_graph.num_edges(),
+            print(
+                "\t\tValid rating pairs : {}".format(
+                    self.valid_rating_info.shape[0]
+                )
             )
-        )
-        print(
-            "Test enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.test_enc_graph.num_nodes("user"),
-                self.test_enc_graph.num_nodes("movie"),
-                _npairs(self.test_enc_graph),
+            print(
+                "\tTest rating pairs  : {}".format(self.test_rating_info.shape[0])
             )
-        )
-        print(
-            "Test dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
-                self.test_dec_graph.num_nodes("user"),
-                self.test_dec_graph.num_nodes("movie"),
-                self.test_dec_graph.num_edges(),
+            info_line = "Feature dim: "
+            info_line += "\nuser: {}".format(self.user_feature_shape)
+            info_line += "\nmovie: {}".format(self.movie_feature_shape)
+            print(info_line)
+            
+            def _npairs(graph):
+                rst = 0
+                for r in self.possible_rating_values:
+                    r = to_etype_name(r)
+                    rst += graph.num_edges(str(r))
+                return rst
+
+            print(
+                "Train enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.train_enc_graph.num_nodes("user"),
+                    self.train_enc_graph.num_nodes("movie"),
+                    _npairs(self.train_enc_graph),
+                )
             )
-        )
+            print(
+                "Train dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.train_dec_graph.num_nodes("user"),
+                    self.train_dec_graph.num_nodes("movie"),
+                    self.train_dec_graph.num_edges(),
+                )
+            )
+            print(
+                "Valid enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.valid_enc_graph.num_nodes("user"),
+                    self.valid_enc_graph.num_nodes("movie"),
+                    _npairs(self.valid_enc_graph),
+                )
+            )
+            print(
+                "Valid dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.valid_dec_graph.num_nodes("user"),
+                    self.valid_dec_graph.num_nodes("movie"),
+                    self.valid_dec_graph.num_edges(),
+                )
+            )
+            print(
+                "Test enc graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.test_enc_graph.num_nodes("user"),
+                    self.test_enc_graph.num_nodes("movie"),
+                    _npairs(self.test_enc_graph),
+                )
+            )
+            print(
+                "Test dec graph: \t#user:{}\t#movie:{}\t#pairs:{}".format(
+                    self.test_dec_graph.num_nodes("user"),
+                    self.test_dec_graph.num_nodes("movie"),
+                    self.test_dec_graph.num_edges(),
+                )
+            )
+
+    def __getitem__(self, idx):
+        assert idx == 0, "This dataset has only one graph"
+        if self._transform is None:
+            return self._g
+        else:
+            return self._transform(self._g)
+
+    def __len__(self):
+        return 1
+
+    def save(self):
+        # save processed data to directory `self.save_path`
+        pass
+
+    def load(self):
+        # load processed data from directory `self.save_path`
+        pass
+
+    def has_cache(self):
+        # check whether there are processed data in `self.save_path`
+        pass
 
     def _generate_pair_value(self, rating_info):
         rating_pairs = (
@@ -785,4 +810,5 @@ class MovieLens(object):
 
 
 if __name__ == "__main__":
-    MovieLens("ml-100k", device=th.device("cpu"), symm=True)
+    data = MovieLens("ml-100k", device=th.device("cpu"), symm=True)
+    pass
