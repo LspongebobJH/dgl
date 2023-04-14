@@ -785,4 +785,5 @@ class MovieLens(object):
 
 
 if __name__ == "__main__":
-    MovieLens("ml-100k", device=th.device("cpu"), symm=True)
+    data = MovieLens("ml-100k", device=th.device("cpu"), symm=True)
+    pass  
