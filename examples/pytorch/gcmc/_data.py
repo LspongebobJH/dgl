@@ -10,12 +10,6 @@ import torch as th
 from dgl.data.utils import download, extract_archive, get_download_dir
 from utils import to_etype_name
 
-'''
-Jiahang Li
-[] TODO: combine all train, valid, test graphs into a single one.
-[] TODO: what the difference between enc and dec graph?
-[] TODO: refactor MovieLens class into dgl dataset form.
-'''
 _urls = {
     "ml-100k": "http://files.grouplens.org/datasets/movielens/ml-100k.zip",
     "ml-1m": "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
